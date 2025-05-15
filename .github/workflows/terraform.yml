@@ -1,19 +1,39 @@
-name: Terraform Deploy
+name: Deploy AKS with Terraform
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
+    inputs:
+      subscription_id:
+        description: "Azure Subscription ID"
+        required: true
+      tenant_id:
+        description: "Azure Tenant ID"
+        required: true
+      client_id:
+        description: "Azure Client ID"
+        required: true
+      client_secret:
+        description: "Azure Client Secret"
+        required: true
+      resource_group_name:
+        description: "Azure Resource Group Name"
+        required: true
+      dns_prefix:
+        description: "DNS Prefix for AKS"
+        required: true
+      location:
+        description: "Azure Region"
+        default: "East US"
+      node_count:
+        description: "AKS Node Count"
+        default: "1"
+      vm_size:
+        description: "AKS VM Size"
+        default: "Standard_D2s_v3"
 
 jobs:
   terraform:
     runs-on: ubuntu-latest
-
-    env:
-      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
-      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
-      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
 
     steps:
       - name: Checkout code
@@ -24,9 +44,33 @@ jobs:
 
       - name: Terraform Init
         run: terraform init
-        
+
       - name: Terraform Plan
-        run: terraform plan
-        
+        run: |
+          terraform plan \
+            -var="subscription_id=${{ github.event.inputs.subscription_id }}" \
+            -var="resource_group_name=${{ github.event.inputs.resource_group_name }}" \
+            -var="dns_prefix=${{ github.event.inputs.dns_prefix }}" \
+            -var="node_count=${{ github.event.inputs.node_count }}" \
+            -var="vm_size=${{ github.event.inputs.vm_size }}" \
+            -var="location=${{ github.event.inputs.location }}"
+        env:
+          ARM_CLIENT_ID: ${{ github.event.inputs.client_id }}
+          ARM_CLIENT_SECRET: ${{ github.event.inputs.client_secret }}
+          ARM_TENANT_ID: ${{ github.event.inputs.tenant_id }}
+          ARM_SUBSCRIPTION_ID: ${{ github.event.inputs.subscription_id }}
+
       - name: Terraform Apply
-        run: terraform apply -auto-approve
+        run: |
+          terraform apply -auto-approve \
+            -var="subscription_id=${{ github.event.inputs.subscription_id }}" \
+            -var="resource_group_name=${{ github.event.inputs.resource_group_name }}" \
+            -var="dns_prefix=${{ github.event.inputs.dns_prefix }}" \
+            -var="node_count=${{ github.event.inputs.node_count }}" \
+            -var="vm_size=${{ github.event.inputs.vm_size }}" \
+            -var="location=${{ github.event.inputs.location }}"
+        env:
+          ARM_CLIENT_ID: ${{ github.event.inputs.client_id }}
+          ARM_CLIENT_SECRET: ${{ github.event.inputs.client_secret }}
+          ARM_TENANT_ID: ${{ github.event.inputs.tenant_id }}
+          ARM_SUBSCRIPTION_ID: ${{ github.event.inputs.subscription_id }}
