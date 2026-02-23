@@ -1,0 +1,80 @@
+name: Bootstrap GitOps Repository
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Target branch to commit to (will be created if missing)"
+        required: false
+        default: "main"
+      commit_message:
+        description: "Commit message"
+        required: false
+        default: "chore(gitops): initialize repo structure"
+      git_user_name:
+        description: "Git author name for the commit"
+        required: false
+        default: "github-actions[bot]"
+      git_user_email:
+        description: "Git author email for the commit"
+        required: false
+        default: "github-actions[bot]@users.noreply.github.com"
+      add_examples:
+        description: "Add example Argo CD Application and App-of-Apps (true/false)"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write  # needed to push commits
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+          # Fetch full history so we can create branch if it doesn't exist
+          fetch-depth: 0
+
+      - name: Ensure target branch exists (create if missing)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BRANCH="${{ github.event.inputs.branch }}"
+          if [ -z "$(git ls-remote --heads origin "$BRANCH")" ]; then
+            echo "Branch $BRANCH does not exist on remote. Creating it..."
+            # If repo is empty, create an initial commit
+            if [ -z "$(git rev-parse --verify HEAD 2>/dev/null || true)" ]; then
+              echo "# GitOps Repository" > README.md
+              git add README.md
+              git -c user.name="bootstrap" -c user.email="bootstrap@local" commit -m "Initial commit"
+            fi
+            git checkout -b "$BRANCH"
+            git push -u origin "$BRANCH"
+          else
+            echo "Branch $BRANCH exists. Checking out…"
+            git checkout "$BRANCH"
+          fi
+
+      - name: Create GitOps folder structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p gitops/apps
+          mkdir -p gitops/environments/dev
+          mkdir -p gitops/environments/stage
+          mkdir -p gitops/environments/prod
+          mkdir -p gitops/platform/argocd
+          mkdir -p gitops/platform/ingress
+          mkdir -p gitops/platform/monitoring
+          # Placeholders so empty dirs are tracked
+          for d in gitops/apps gitops/environments/dev gitops/environments/stage gitops/environments/prod gitops/platform/argocd gitops/platform/ingress gitops/platform/monitoring; do
+            touch "$d/.gitkeep"
+          done
+          # Top-level README if missing
+          if [ ! -f README.md ]; then
+            cat > README.md <<'EOF'
+# GitOps Repository
