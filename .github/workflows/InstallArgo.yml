@@ -1,19 +1,22 @@
-name: Install ArgoCD on AKS (OIDC via Inputs)
+name: Install ArgoCD on AKS (Service Principal Auth)
 
 on:
   workflow_dispatch:
     inputs:
-      azure_client_id:
-        description: "Azure Entra ID Application (Client) ID"
-        required: true
-      azure_tenant_id:
-        description: "Azure Entra ID Tenant ID"
-        required: true
-      azure_subscription_id:
+      subscription_id:
         description: "Azure Subscription ID"
         required: true
+      tenant_id:
+        description: "Azure Tenant ID"
+        required: true
+      client_id:
+        description: "Azure Client ID"
+        required: true
+      client_secret:
+        description: "Azure Client Secret"
+        required: true
       resource_group:
-        description: "AKS Resource Group"
+        description: "Resource Group of AKS"
         required: true
       aks_cluster_name:
         description: "AKS Cluster Name"
@@ -23,52 +26,25 @@ on:
         required: false
         default: "argocd"
 
-permissions:
-  id-token: write   # Required for OIDC
-  contents: read
-
 jobs:
   install-argocd:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Explicit validation without dynamic indexing
-      - name: Validate Required Inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          missing=0
-          if [ -z "${{ github.event.inputs.azure_client_id }}" ]; then echo "::error::azure_client_id is required"; missing=1; fi
-          if [ -z "${{ github.event.inputs.azure_tenant_id }}" ]; then echo "::error::azure_tenant_id is required"; missing=1; fi
-          if [ -z "${{ github.event.inputs.azure_subscription_id }}" ]; then echo "::error::azure_subscription_id is required"; missing=1; fi
-          if [ -z "${{ github.event.inputs.resource_group }}" ]; then echo "::error::resource_group is required"; missing=1; fi
-          if [ -z "${{ github.event.inputs.aks_cluster_name }}" ]; then echo "::error::aks_cluster_name is required"; missing=1; fi
-          if [ "$missing" -ne 0 ]; then exit 1; fi
-
-      - name: Resolve Namespace
-        id: ns
-        shell: bash
-        run: |
-          NS="${{ github.event.inputs.namespace }}"
-          if [ -z "$NS" ]; then NS="argocd"; fi
-          echo "namespace=$NS" >> "$GITHUB_OUTPUT"
-
-      - name: Azure Login (OIDC)
+      # ⭐ Login with SERVICE PRINCIPAL + CLIENT SECRET
+      - name: Azure Login (Service Principal)
         uses: azure/login@v2
         with:
-          client-id: ${{ github.event.inputs.azure_client_id }}
-          tenant-id: ${{ github.event.inputs.azure_tenant_id }}
-          subscription-id: ${{ github.event.inputs.azure_subscription_id }}
-
-      - name: Verify Azure Context
-        run: az account show -o table
+          client-id: ${{ github.event.inputs.client_id }}
+          tenant-id: ${{ github.event.inputs.tenant_id }}
+          subscription-id: ${{ github.event.inputs.subscription_id }}
+          client-secret: ${{ github.event.inputs.client_secret }}
 
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
-        with:
-          version: latest
 
       - name: Get AKS Credentials
         run: |
@@ -80,36 +56,34 @@ jobs:
       - name: Validate Cluster
         run: kubectl get nodes -o wide
 
-      - name: Create Namespace (idempotent)
+      - name: Create Namespace
         run: |
-          kubectl create namespace "${{ steps.ns.outputs.namespace }}" --dry-run=client -o yaml | kubectl apply -f -
-          kubectl get ns "${{ steps.ns.outputs.namespace }}"
+          NS="${{ github.event.inputs.namespace }}"
+          kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl get ns "$NS"
 
       - name: Install ArgoCD
         run: |
-          kubectl apply -n "${{ steps.ns.outputs.namespace }}" \
+          NS="${{ github.event.inputs.namespace }}"
+          kubectl apply -n "$NS" \
             -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
-      - name: Wait for ArgoCD to be Ready
+      - name: Wait for ArgoCD Components
         run: |
-          kubectl wait --for=condition=Available deployment --all \
-            -n "${{ steps.ns.outputs.namespace }}" --timeout=600s
-          kubectl get pods -n "${{ steps.ns.outputs.namespace }}"
+          NS="${{ github.event.inputs.namespace }}"
+          kubectl wait --for=condition=Available deployment --all -n "$NS" --timeout=600s
+          kubectl get pods -n "$NS"
 
-      - name: Get Initial Admin Password (masked)
-        id: argocd_pwd
-        shell: bash
+      - name: Get ArgoCD Admin Password
         run: |
-          set -euo pipefail
-          PASS="$(kubectl -n "${{ steps.ns.outputs.namespace }}" get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)"
-          echo "::add-mask::$PASS"
-          echo "password=$PASS" >> "$GITHUB_OUTPUT"
-          echo "ARGOCD PASSWORD:"
-          echo "$PASS"
+          NS="${{ github.event.inputs.namespace }}"
+          echo "ArgoCD Admin Password:"
+          kubectl -n "$NS" get secret argocd-initial-admin-secret \
+            -o jsonpath="{.data.password}" | base64 -d
 
-      - name: How to Access ArgoCD
+      - name: Access Info
         run: |
           echo "Username: admin"
-          echo "To access locally via port-forward:"
-          echo "kubectl -n ${{ steps.ns.outputs.namespace }} port-forward svc/argocd-server 8080:443"
-          echo "Then open: https://localhost:8080"
+          echo "Use port-forward to access ArgoCD:"
+          echo "kubectl port-forward -n ${{ github.event.inputs.namespace }} svc/argocd-server 8080:443"
+          echo "Open: https://localhost:8080"
