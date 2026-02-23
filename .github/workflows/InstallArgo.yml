@@ -34,21 +34,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Explicit validation without dynamic indexing
       - name: Validate Required Inputs
         shell: bash
         run: |
           set -euo pipefail
-          MISSING=0
-          for VAR in azure_client_id azure_tenant_id azure_subscription_id resource_group aks_cluster_name; do
-            VAL="${{ github.event.inputs[VAR] }}"
-            if [ -z "$VAL" ]; then
-              echo "::error::Input '$VAR' is required and was not provided."
-              MISSING=1
-            fi
-          done
-          if [ "$MISSING" -ne 0 ]; then
-            exit 1
-          fi
+          missing=0
+          if [ -z "${{ github.event.inputs.azure_client_id }}" ]; then echo "::error::azure_client_id is required"; missing=1; fi
+          if [ -z "${{ github.event.inputs.azure_tenant_id }}" ]; then echo "::error::azure_tenant_id is required"; missing=1; fi
+          if [ -z "${{ github.event.inputs.azure_subscription_id }}" ]; then echo "::error::azure_subscription_id is required"; missing=1; fi
+          if [ -z "${{ github.event.inputs.resource_group }}" ]; then echo "::error::resource_group is required"; missing=1; fi
+          if [ -z "${{ github.event.inputs.aks_cluster_name }}" ]; then echo "::error::aks_cluster_name is required"; missing=1; fi
+          if [ "$missing" -ne 0 ]; then exit 1; fi
 
       - name: Resolve Namespace
         id: ns
