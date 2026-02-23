@@ -1,13 +1,22 @@
-name: Install ArgoCD on AKS
+name: Install ArgoCD on AKS (OIDC via Inputs)
 
 on:
   workflow_dispatch:
     inputs:
-      aks_cluster_name:
-        description: "AKS Cluster Name"
+      azure_client_id:
+        description: "Azure Entra ID Application (Client) ID"
+        required: true
+      azure_tenant_id:
+        description: "Azure Entra ID Tenant ID"
+        required: true
+      azure_subscription_id:
+        description: "Azure Subscription ID"
         required: true
       resource_group:
-        description: "Resource Group"
+        description: "AKS Resource Group"
+        required: true
+      aks_cluster_name:
+        description: "AKS Cluster Name"
         required: true
       namespace:
         description: "ArgoCD Namespace"
@@ -15,7 +24,7 @@ on:
         default: "argocd"
 
 permissions:
-  id-token: write
+  id-token: write   # Required for OIDC
   contents: read
 
 jobs:
@@ -25,20 +34,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Azure Login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Verify Azure Context
-        run: az account show -o table
-
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v4
-        with:
-          version: latest
+      - name: Validate Required Inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          MISSING=0
+          for VAR in azure_client_id azure_tenant_id azure_subscription_id resource_group aks_cluster_name; do
+            VAL="${{ github.event.inputs[VAR] }}"
+            if [ -z "$VAL" ]; then
+              echo "::error::Input '$VAR' is required and was not provided."
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -ne 0 ]; then
+            exit 1
+          fi
 
       - name: Resolve Namespace
         id: ns
@@ -47,6 +57,21 @@ jobs:
           NS="${{ github.event.inputs.namespace }}"
           if [ -z "$NS" ]; then NS="argocd"; fi
           echo "namespace=$NS" >> "$GITHUB_OUTPUT"
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ github.event.inputs.azure_client_id }}
+          tenant-id: ${{ github.event.inputs.azure_tenant_id }}
+          subscription-id: ${{ github.event.inputs.azure_subscription_id }}
+
+      - name: Verify Azure Context
+        run: az account show -o table
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: latest
 
       - name: Get AKS Credentials
         run: |
@@ -58,7 +83,7 @@ jobs:
       - name: Validate Cluster
         run: kubectl get nodes -o wide
 
-      - name: Create Namespace
+      - name: Create Namespace (idempotent)
         run: |
           kubectl create namespace "${{ steps.ns.outputs.namespace }}" --dry-run=client -o yaml | kubectl apply -f -
           kubectl get ns "${{ steps.ns.outputs.namespace }}"
@@ -68,24 +93,26 @@ jobs:
           kubectl apply -n "${{ steps.ns.outputs.namespace }}" \
             -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
-      - name: Wait for ArgoCD
+      - name: Wait for ArgoCD to be Ready
         run: |
-          kubectl wait --for=condition=Available deployment --all -n "${{ steps.ns.outputs.namespace }}" --timeout=600s
+          kubectl wait --for=condition=Available deployment --all \
+            -n "${{ steps.ns.outputs.namespace }}" --timeout=600s
           kubectl get pods -n "${{ steps.ns.outputs.namespace }}"
 
-      - name: Get Admin Password
+      - name: Get Initial Admin Password (masked)
         id: argocd_pwd
         shell: bash
         run: |
+          set -euo pipefail
           PASS="$(kubectl -n "${{ steps.ns.outputs.namespace }}" get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)"
           echo "::add-mask::$PASS"
           echo "password=$PASS" >> "$GITHUB_OUTPUT"
-          echo "ARGOCD PASSWORD (also captured as this step's output):"
+          echo "ARGOCD PASSWORD:"
           echo "$PASS"
 
-      - name: Login Tips
+      - name: How to Access ArgoCD
         run: |
           echo "Username: admin"
-          echo "Port-forward (local access):"
-          echo "kubectl port-forward svc/argocd-server -n ${{ steps.ns.outputs.namespace }} 8080:443"
-          echo "Open: https://localhost:8080"
+          echo "To access locally via port-forward:"
+          echo "kubectl -n ${{ steps.ns.outputs.namespace }} port-forward svc/argocd-server 8080:443"
+          echo "Then open: https://localhost:8080"
