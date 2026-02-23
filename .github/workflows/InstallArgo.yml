@@ -18,7 +18,6 @@ jobs:
 install-argocd:
 runs-on: ubuntu-latest
 
-```
 env:
   AKS_CLUSTER_NAME: ${{ github.event.inputs.aks_cluster_name }}
   RESOURCE_GROUP: ${{ github.event.inputs.resource_group }}
@@ -66,4 +65,3 @@ steps:
       echo "ARGOCD PASSWORD:"
       kubectl -n $NAMESPACE get secret argocd-initial-admin-secret \
         -o jsonpath="{.data.password}" | base64 -d
-```
