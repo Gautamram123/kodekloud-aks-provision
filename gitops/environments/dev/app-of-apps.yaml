@@ -1,0 +1,37 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dev
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/your-user/your-gitops-repo.git
+    path: gitops/environments/dev
+    targetRevision: main
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: my-service-dev
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/your-user/your-gitops-repo.git
+    path: gitops/apps/my-service
+    targetRevision: main
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: my-service
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
