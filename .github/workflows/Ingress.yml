@@ -1,0 +1,176 @@
+name: Install NGINX Ingress Controller on AKS (Terraform-style SP Login)
+
+on:
+  workflow_dispatch:
+    inputs:
+      subscription_id:
+        description: "Azure Subscription ID"
+        required: true
+      tenant_id:
+        description: "Azure Tenant ID"
+        required: true
+      client_id:
+        description: "Azure Client ID"
+        required: true
+      client_secret:
+        description: "Azure Client Secret"
+        required: true
+      resource_group:
+        description: "Resource Group of AKS"
+        required: true
+      aks_cluster_name:
+        description: "AKS Cluster Name"
+        required: true
+      namespace:
+        description: "Namespace for Ingress Controller"
+        required: false
+        default: "ingress-nginx"
+      controller_replicas:
+        description: "Number of ingress controller replicas"
+        required: false
+        default: "2"
+
+jobs:
+  install-ingress:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Direct Azure CLI login using Service Principal + Secret (no OIDC)
+      - name: Azure CLI Login (Service Principal)
+        shell: bash
+        env:
+          AZ_SUBSCRIPTION_ID: ${{ github.event.inputs.subscription_id }}
+          AZ_TENANT_ID:       ${{ github.event.inputs.tenant_id }}
+          AZ_CLIENT_ID:       ${{ github.event.inputs.client_id }}
+          AZ_CLIENT_SECRET:   ${{ github.event.inputs.client_secret }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$AZ_CLIENT_SECRET"
+          az cloud set -n AzureCloud
+          az logout || true
+          az login --service-principal \
+            --username "$AZ_CLIENT_ID" \
+            --password "$AZ_CLIENT_SECRET" \
+            --tenant "$AZ_TENANT_ID" \
+            --output none
+          az account set --subscription "$AZ_SUBSCRIPTION_ID"
+          az account show -o table
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: latest
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: latest
+
+      - name: Get AKS Credentials
+        run: |
+          az aks get-credentials \
+            --resource-group "${{ github.event.inputs.resource_group }}" \
+            --name "${{ github.event.inputs.aks_cluster_name }}" \
+            --overwrite-existing
+
+      - name: Add ingress-nginx Helm repo
+        run: |
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update
+
+      - name: Install / Upgrade NGINX Ingress Controller (LoadBalancer)
+        env:
+          NAMESPACE: ${{ github.event.inputs.namespace }}
+          REPLICAS:  ${{ github.event.inputs.controller_replicas }}
+        run: |
+          # Create namespace if missing (idempotent)
+          kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+          # Install/upgrade with sane defaults for AKS
+          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+            --namespace "$NAMESPACE" \
+            --set controller.replicaCount="$REPLICAS" \
+            --set controller.nodeSelector."kubernetes\.io/os"=linux \
+            --set defaultBackend.nodeSelector."kubernetes\.io/os"=linux
+
+      # --- Verification: pods, deployment, service types
+      - name: Verify controller resources
+        env:
+          NAMESPACE: ${{ github.event.inputs.namespace }}
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods -n "$NAMESPACE" -o wide
+          echo "=== Deployments ==="
+          kubectl get deploy -n "$NAMESPACE"
+          echo "=== Services ==="
+          kubectl get svc -n "$NAMESPACE"
+
+      # Wait for Azure LoadBalancer to assign an external IP
+      - name: Wait for LoadBalancer External IP
+        id: waitlb
+        shell: bash
+        env:
+          NAMESPACE: ${{ github.event.inputs.namespace }}
+        run: |
+          set -euo pipefail
+          SVC="ingress-nginx-controller"
+          echo "Waiting for External IP on service: $SVC in namespace: $NAMESPACE"
+
+          # Wait for service to exist and be of type LoadBalancer
+          kubectl wait --for=condition=available deploy/ingress-nginx-controller -n "$NAMESPACE" --timeout=600s || true
+
+          # Poll until external IP appears
+          for i in {1..60}; do
+            IP=$(kubectl get svc "$SVC" -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+            HOSTNAME=$(kubectl get svc "$SVC" -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            if [[ -n "$IP" || -n "$HOSTNAME" ]]; then
+              echo "external_ip=${IP:-}"       >> "$GITHUB_OUTPUT"
+              echo "external_hostname=${HOSTNAME:-}" >> "$GITHUB_OUTPUT"
+              echo "External endpoint is ready."
+              break
+            fi
+            echo "Waiting for external IP... (attempt $i/60)"
+            sleep 10
+          done
+
+          # Print current service status
+          kubectl get svc "$SVC" -n "$NAMESPACE" -o wide
+
+          # Fail if neither IP nor hostname is present after waiting
+          if [[ -z "${IP:-}" && -z "${HOSTNAME:-}" ]]; then
+            echo "ERROR: No external IP/hostname assigned to $SVC in namespace $NAMESPACE within timeout."
+            exit 1
+          fi
+
+      - name: Print External Endpoint
+        env:
+          IP:       ${{ steps.waitlb.outputs.external_ip }}
+          HOSTNAME: ${{ steps.waitlb.outputs.external_hostname }}
+          NAMESPACE: ${{ github.event.inputs.namespace }}
+        run: |
+          echo "========================================="
+          echo "NGINX Ingress Controller external endpoint"
+          if [[ -n "$IP" ]]; then
+            echo "External IP:       $IP"
+            echo "HTTP URL:          http://$IP"
+            echo "HTTPS URL:         https://$IP"
+          fi
+          if [[ -n "$HOSTNAME" ]]; then
+            echo "External Hostname: $HOSTNAME"
+            echo "HTTP URL:          http://$HOSTNAME"
+            echo "HTTPS URL:         https://$HOSTNAME"
+          fi
+          echo "Namespace:          $NAMESPACE"
+          echo "========================================="
+
+      # Additional Verification Commands
+      - name: Additional verifications
+        env:
+          NAMESPACE: ${{ github.event.inputs.namespace }}
+        run: |
+          echo "=== Describe Service ==="
+          kubectl describe svc ingress-nginx-controller -n "$NAMESPACE" || true
+          echo "=== Controller readiness ==="
+          kubectl -n "$NAMESPACE" rollout status deploy/ingress-nginx-controller --timeout=600s || true
