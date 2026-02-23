@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: "Target branch to commit to (will be created if missing)"
+        description: "Target branch to commit to (will be created/reset if missing)"
         required: false
         default: "main"
       commit_message:
@@ -20,12 +20,12 @@ on:
         required: false
         default: "github-actions[bot]@users.noreply.github.com"
       add_examples:
-        description: "Add example Argo CD Application and App-of-Apps (true/false)"
+        description: "Add example Argo CD manifests (true/false)"
         required: false
         default: "false"
 
 permissions:
-  contents: write  # needed to push commits
+  contents: write
 
 jobs:
   bootstrap:
@@ -35,31 +35,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.branch }}
-          # Fetch full history so we can create branch if it doesn't exist
           fetch-depth: 0
 
-      - name: Ensure target branch exists (create if missing)
+      - name: Configure git author
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name  "${{ github.event.inputs.git_user_name }}"
+          git config user.email "${{ github.event.inputs.git_user_email }}"
+
+      - name: Ensure target branch exists and check out
         shell: bash
         run: |
           set -euo pipefail
           BRANCH="${{ github.event.inputs.branch }}"
-          if [ -z "$(git ls-remote --heads origin "$BRANCH")" ]; then
-            echo "Branch $BRANCH does not exist on remote. Creating it..."
-            # If repo is empty, create an initial commit
-            if [ -z "$(git rev-parse --verify HEAD 2>/dev/null || true)" ]; then
-              echo "# GitOps Repository" > README.md
-              git add README.md
-              git -c user.name="bootstrap" -c user.email="bootstrap@local" commit -m "Initial commit"
-            fi
-            git checkout -b "$BRANCH"
-            git push -u origin "$BRANCH"
-          else
-            echo "Branch $BRANCH exists. Checking out…"
-            git checkout "$BRANCH"
-          fi
+          # Create or reset local branch to current HEAD, then push upstream if missing
+          git checkout -B "$BRANCH"
+          # If remote doesn't have this branch yet, set upstream on first push later
+          echo "Checked out branch: $BRANCH"
 
-      - name: Create GitOps folder structure
+      - name: Create GitOps folder structure (+ .gitkeep)
         shell: bash
         run: |
           set -euo pipefail
@@ -70,11 +65,66 @@ jobs:
           mkdir -p gitops/platform/argocd
           mkdir -p gitops/platform/ingress
           mkdir -p gitops/platform/monitoring
-          # Placeholders so empty dirs are tracked
-          for d in gitops/apps gitops/environments/dev gitops/environments/stage gitops/environments/prod gitops/platform/argocd gitops/platform/ingress gitops/platform/monitoring; do
-            touch "$d/.gitkeep"
+
+          # Ensure empty directories are tracked
+          for d in \
+            gitops/apps \
+            gitops/environments/dev \
+            gitops/environments/stage \
+            gitops/environments/prod \
+            gitops/platform/argocd \
+            gitops/platform/ingress \
+            gitops/platform/monitoring
+          do
+            [ -f "$d/.gitkeep" ] || : > "$d/.gitkeep"
           done
-          # Top-level README if missing
+
+          # Minimal README (no here-docs; keep it very small)
           if [ ! -f README.md ]; then
-            cat > README.md <<'EOF'
-# GitOps Repository
+            printf '%s\n' "# GitOps Repository" "" \
+            "\`gitops/\` contains:" \
+            "- apps/: application manifests / charts / kustomize overlays" \
+            "- environments/: env-specific app-of-apps (dev/stage/prod)" \
+            "- platform/: cluster-wide components (argocd, ingress, monitoring)" \
+            > README.md
+          fi
+
+      - name: Optionally add example Argo CD manifests (no here-docs)
+        if: ${{ github.event.inputs.add_examples == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p gitops/apps/my-service
+          # Example Application manifest (ANSI-C quoted string with \n)
+          APP_MANIFEST=$'apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: my-service\n  namespace: argocd\nspec:\n  project: default\n  source:\n    repoURL: https://github.com/your-org/your-app-repo\n    targetRevision: main\n    path: k8s\n  destination:\n    server: https://kubernetes.default.svc\n    namespace: my-service\n  syncPolicy:\n    automated:\n      prune: true\n      selfHeal: true\n'
+          printf '%s' "$APP_MANIFEST" > gitops/apps/my-service/app.yaml
+
+          mkdir -p gitops/environments/dev
+          # Example App-of-Apps with two docs separated by '---'
+          APP_OF_APPS=$'apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: dev\n  namespace: argocd\nspec:\n  project: default\n  source:\n    repoURL: https://github.com/your-user/your-gitops-repo.git\n    path: gitops/environments/dev\n    targetRevision: main\n  destination:\n    server: https://kubernetes.default.svc\n    namespace: argocd\n  syncPolicy:\n    automated:\n      prune: true\n      selfHeal: true\n---\napiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: my-service-dev\n  namespace: argocd\nspec:\n  project: default\n  source:\n    repoURL: https://github.com/your-user/your-gitops-repo.git\n    path: gitops/apps/my-service\n    targetRevision: main\n  destination:\n    server: https://kubernetes.default.svc\n    namespace: my-service\n  syncPolicy:\n    automated:\n      prune: true\n      selfHeal: true\n'
+          printf '%s' "$APP_OF_APPS" > gitops/environments/dev/app-of-apps.yaml
+
+          # Platform note (small markdown created without here-docs)
+          [ -f gitops/platform/argocd/README.md ] || printf '%s\n' "# Argo CD Bootstrap" "Place Argo CD install manifests/values here." > gitops/platform/argocd/README.md
+
+      - name: Commit changes (if any)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "${{ github.event.inputs.commit_message }}"
+
+      - name: Push branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BRANCH="${{ github.event.inputs.branch }}"
+          # Try normal push first; if upstream isn’t set (new branch), set it
+          if git push origin "$BRANCH"; then
+            exit 0
+          fi
+          git push -u origin "$BRANCH"
