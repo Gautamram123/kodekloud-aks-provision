@@ -1,4 +1,4 @@
-name: Install ArgoCD on AKS (Service Principal Auth)
+name: Install ArgoCD on AKS (Terraform-style SP Login)
 
 on:
   workflow_dispatch:
@@ -34,17 +34,40 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ⭐ Login with SERVICE PRINCIPAL + CLIENT SECRET
-      - name: Azure Login (Service Principal)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ github.event.inputs.client_id }}
-          tenant-id: ${{ github.event.inputs.tenant_id }}
-          subscription-id: ${{ github.event.inputs.subscription_id }}
-          client-secret: ${{ github.event.inputs.client_secret }}
+      # 🚫 No azure/login — do a direct az login with SP + secret, like Terraform
+      - name: Azure CLI Login (Service Principal)
+        shell: bash
+        env:
+          AZ_SUBSCRIPTION_ID: ${{ github.event.inputs.subscription_id }}
+          AZ_TENANT_ID:       ${{ github.event.inputs.tenant_id }}
+          AZ_CLIENT_ID:       ${{ github.event.inputs.client_id }}
+          AZ_CLIENT_SECRET:   ${{ github.event.inputs.client_secret }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$AZ_CLIENT_SECRET"
+          az cloud set -n AzureCloud
+          az logout || true
+          az login --service-principal \
+            --username "$AZ_CLIENT_ID" \
+            --password "$AZ_CLIENT_SECRET" \
+            --tenant "$AZ_TENANT_ID" \
+            --output none
+          az account set --subscription "$AZ_SUBSCRIPTION_ID"
+          echo "Logged in as:"
+          az account show -o table
 
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
+        with:
+          version: latest
+
+      - name: Resolve Namespace
+        id: ns
+        shell: bash
+        run: |
+          NS="${{ github.event.inputs.namespace }}"
+          if [ -z "$NS" ]; then NS="argocd"; fi
+          echo "namespace=$NS" >> "$GITHUB_OUTPUT"
 
       - name: Get AKS Credentials
         run: |
@@ -56,34 +79,35 @@ jobs:
       - name: Validate Cluster
         run: kubectl get nodes -o wide
 
-      - name: Create Namespace
+      - name: Create Namespace (idempotent)
         run: |
-          NS="${{ github.event.inputs.namespace }}"
-          kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
-          kubectl get ns "$NS"
+          kubectl create namespace "${{ steps.ns.outputs.namespace }}" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl get ns "${{ steps.ns.outputs.namespace }}"
 
       - name: Install ArgoCD
         run: |
-          NS="${{ github.event.inputs.namespace }}"
-          kubectl apply -n "$NS" \
+          kubectl apply -n "${{ steps.ns.outputs.namespace }}" \
             -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
-      - name: Wait for ArgoCD Components
+      - name: Wait for ArgoCD to be Ready
         run: |
-          NS="${{ github.event.inputs.namespace }}"
-          kubectl wait --for=condition=Available deployment --all -n "$NS" --timeout=600s
-          kubectl get pods -n "$NS"
+          kubectl wait --for=condition=Available deployment --all -n "${{ steps.ns.outputs.namespace }}" --timeout=600s
+          kubectl get pods -n "${{ steps.ns.outputs.namespace }}"
 
-      - name: Get ArgoCD Admin Password
+      - name: Get Initial Admin Password (masked)
+        id: argocd_pwd
+        shell: bash
         run: |
-          NS="${{ github.event.inputs.namespace }}"
-          echo "ArgoCD Admin Password:"
-          kubectl -n "$NS" get secret argocd-initial-admin-secret \
-            -o jsonpath="{.data.password}" | base64 -d
+          set -euo pipefail
+          PASS="$(kubectl -n "${{ steps.ns.outputs.namespace }}" get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)"
+          echo "::add-mask::$PASS"
+          echo "password=$PASS" >> "$GITHUB_OUTPUT"
+          echo "ARGOCD PASSWORD:"
+          echo "$PASS"
 
-      - name: Access Info
+      - name: How to Access ArgoCD
         run: |
           echo "Username: admin"
-          echo "Use port-forward to access ArgoCD:"
-          echo "kubectl port-forward -n ${{ github.event.inputs.namespace }} svc/argocd-server 8080:443"
+          echo "Local port-forward access:"
+          echo "kubectl -n ${{ steps.ns.outputs.namespace }} port-forward svc/argocd-server 8080:443"
           echo "Open: https://localhost:8080"
