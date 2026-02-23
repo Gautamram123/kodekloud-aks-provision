@@ -34,7 +34,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 🚫 No azure/login — do a direct az login with SP + secret, like Terraform
       - name: Azure CLI Login (Service Principal)
         shell: bash
         env:
@@ -53,7 +52,6 @@ jobs:
             --tenant "$AZ_TENANT_ID" \
             --output none
           az account set --subscription "$AZ_SUBSCRIPTION_ID"
-          echo "Logged in as:"
           az account show -o table
 
       - name: Setup kubectl
@@ -84,9 +82,16 @@ jobs:
           kubectl create namespace "${{ steps.ns.outputs.namespace }}" --dry-run=client -o yaml | kubectl apply -f -
           kubectl get ns "${{ steps.ns.outputs.namespace }}"
 
-      - name: Install ArgoCD
+      - name: Pre-clean CRD last-applied annotation (idempotent)
+        shell: bash
         run: |
-          kubectl apply -n "${{ steps.ns.outputs.namespace }}" \
+          kubectl annotate crd applicationsets.argoproj.io \
+            kubectl.kubernetes.io/last-applied-configuration- \
+            || true
+
+      - name: Install ArgoCD (Server-Side Apply)
+        run: |
+          kubectl apply --server-side -n "${{ steps.ns.outputs.namespace }}" \
             -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
       - name: Wait for ArgoCD to be Ready
