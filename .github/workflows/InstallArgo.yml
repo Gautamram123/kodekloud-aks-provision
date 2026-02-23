@@ -14,6 +14,10 @@ on:
         required: false
         default: "argocd"
 
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
   install-argocd:
     runs-on: ubuntu-latest
@@ -21,16 +25,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Azure Login
+      - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      - name: Verify Azure Context
+        run: az account show -o table
 
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
+        with:
+          version: latest
+
+      - name: Resolve Namespace
+        id: ns
+        shell: bash
+        run: |
+          NS="${{ github.event.inputs.namespace }}"
+          if [ -z "$NS" ]; then NS="argocd"; fi
+          echo "namespace=$NS" >> "$GITHUB_OUTPUT"
 
       - name: Get AKS Credentials
         run: |
@@ -40,25 +56,36 @@ jobs:
             --overwrite-existing
 
       - name: Validate Cluster
-        run: kubectl get nodes
+        run: kubectl get nodes -o wide
 
       - name: Create Namespace
         run: |
-          kubectl create namespace "${{ github.event.inputs.namespace }}" --dry-run=client -o yaml | kubectl apply -f -
-          kubectl get ns "${{ github.event.inputs.namespace }}"
+          kubectl create namespace "${{ steps.ns.outputs.namespace }}" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl get ns "${{ steps.ns.outputs.namespace }}"
 
       - name: Install ArgoCD
         run: |
-          kubectl apply -n "${{ github.event.inputs.namespace }}" \
+          kubectl apply -n "${{ steps.ns.outputs.namespace }}" \
             -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
       - name: Wait for ArgoCD
         run: |
-          kubectl wait --for=condition=Available deployment --all -n "${{ github.event.inputs.namespace }}" --timeout=600s
-          kubectl get pods -n "${{ github.event.inputs.namespace }}"
+          kubectl wait --for=condition=Available deployment --all -n "${{ steps.ns.outputs.namespace }}" --timeout=600s
+          kubectl get pods -n "${{ steps.ns.outputs.namespace }}"
 
       - name: Get Admin Password
+        id: argocd_pwd
+        shell: bash
         run: |
-          echo "ARGOCD PASSWORD:"
-          kubectl -n "${{ github.event.inputs.namespace }}" get secret argocd-initial-admin-secret \
-            -o jsonpath="{.data.password}" | base64 -d
+          PASS="$(kubectl -n "${{ steps.ns.outputs.namespace }}" get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)"
+          echo "::add-mask::$PASS"
+          echo "password=$PASS" >> "$GITHUB_OUTPUT"
+          echo "ARGOCD PASSWORD (also captured as this step's output):"
+          echo "$PASS"
+
+      - name: Login Tips
+        run: |
+          echo "Username: admin"
+          echo "Port-forward (local access):"
+          echo "kubectl port-forward svc/argocd-server -n ${{ steps.ns.outputs.namespace }} 8080:443"
+          echo "Open: https://localhost:8080"
