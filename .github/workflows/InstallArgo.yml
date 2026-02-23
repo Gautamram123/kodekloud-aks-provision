@@ -2,17 +2,17 @@ name: Install ArgoCD on AKS
 
 on:
   workflow_dispatch:
-inputs:
-  aks_cluster_name:
-  description: "AKS Cluster Name"
-  required: true
-  resource_group:
-  description: "Resource Group"
-  required: true
-  namespace:
-  description: "ArgoCD Namespace"
-  required: false
-  default: "argocd"
+    inputs:
+      aks_cluster_name:
+        description: "AKS Cluster Name"
+        required: true
+      resource_group:
+        description: "Resource Group"
+        required: true
+      namespace:
+        description: "ArgoCD Namespace"
+        required: false
+        default: "argocd"
 
 jobs:
   install-argocd:
@@ -20,7 +20,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-    
+
       - name: Azure Login
         uses: azure/login@v2
         with:
@@ -28,35 +28,35 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-    
+
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
-    
+
       - name: Get AKS Credentials
         run: |
           az aks get-credentials \
             --resource-group "${{ github.event.inputs.resource_group }}" \
             --name "${{ github.event.inputs.aks_cluster_name }}" \
             --overwrite-existing
-    
+
       - name: Validate Cluster
         run: kubectl get nodes
-    
+
       - name: Create Namespace
         run: |
           kubectl create namespace "${{ github.event.inputs.namespace }}" --dry-run=client -o yaml | kubectl apply -f -
           kubectl get ns "${{ github.event.inputs.namespace }}"
-    
+
       - name: Install ArgoCD
         run: |
           kubectl apply -n "${{ github.event.inputs.namespace }}" \
             -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-    
+
       - name: Wait for ArgoCD
         run: |
           kubectl wait --for=condition=Available deployment --all -n "${{ github.event.inputs.namespace }}" --timeout=600s
           kubectl get pods -n "${{ github.event.inputs.namespace }}"
-    
+
       - name: Get Admin Password
         run: |
           echo "ARGOCD PASSWORD:"
