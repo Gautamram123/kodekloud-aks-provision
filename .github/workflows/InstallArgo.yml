@@ -1,10 +1,40 @@
+name: Install ArgoCD on AKS (Terraform-style SP Login)
+
+on:
+  workflow_dispatch:
+    inputs:
+      subscription_id:
+        description: "Azure Subscription ID"
+        required: true
+      tenant_id:
+        description: "Azure Tenant ID"
+        required: true
+      client_id:
+        description: "Azure Client ID"
+        required: true
+      client_secret:
+        description: "Azure Client Secret"
+        required: true
+      resource_group:
+        description: "Resource Group of AKS"
+        required: true
+      aks_cluster_name:
+        description: "AKS Cluster Name"
+        required: true
+      namespace:
+        description: "ArgoCD Namespace"
+        required: false
+        default: "argocd"
+
 jobs:
   install-argocd:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Direct SP login (no azure/login, no OIDC)
       - name: Azure CLI Login (Service Principal)
         shell: bash
         env:
@@ -53,6 +83,7 @@ jobs:
           kubectl create namespace "${{ steps.ns.outputs.namespace }}" --dry-run=client -o yaml | kubectl apply -f -
           kubectl get ns "${{ steps.ns.outputs.namespace }}"
 
+      # Prevent massive last-applied annotations on CRDs (safe if they don't exist)
       - name: Pre-clean CRD last-applied annotation (idempotent)
         shell: bash
         run: |
@@ -60,12 +91,14 @@ jobs:
           kubectl annotate crd applications.argoproj.io   kubectl.kubernetes.io/last-applied-configuration- || true
           kubectl annotate crd appprojects.argoproj.io    kubectl.kubernetes.io/last-applied-configuration- || true
 
+      # Optional: preview on server to see conflicts without failing the job
       - name: Preview ArgoCD apply (server dry-run)
         continue-on-error: true
         run: |
           kubectl apply --server-side --dry-run=server -n "${{ steps.ns.outputs.namespace }}" \
             -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
+      # Take ownership of fields previously managed via client-side apply
       - name: Install / Reconcile ArgoCD (Server-Side Apply, force takeover)
         run: |
           FM="argocd-installer"
@@ -91,4 +124,10 @@ jobs:
           echo "password=$PASS" >> "$GITHUB_OUTPUT"
           echo "ARGOCD PASSWORD:"
           echo "$PASS"
-``
+
+      - name: How to Access ArgoCD
+        run: |
+          echo "Username: admin"
+          echo "Local port-forward access:"
+          echo "kubectl -n ${{ steps.ns.outputs.namespace }} port-forward svc/argocd-server 8080:443"
+          echo "Open: https://localhost:8080"
